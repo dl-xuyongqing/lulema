@@ -12,7 +12,7 @@
       "binding": "DB",
       "database_name": "lulema",
       // 创建 D1 后，将 Cloudflare 返回的 database_id 填在此处。
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "database_id": "d3c6e863-7f0e-4046-9560-2204aa042441",
       "migrations_dir": "migrations"
     }
   ],
