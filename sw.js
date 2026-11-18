@@ -1,8 +1,8 @@
 const PREFIX="lulema-shell-";
-const VERSION="v1";
+const VERSION="v2";
 // 同一域名下的项目各用自己的缓存，避免清理 Hexo 或其他网站的缓存。
 const CACHE=PREFIX+encodeURIComponent(self.registration.scope)+VERSION;
-const SHELL=["./","./index.html","./styles.css","./config.js","./src/app.js","./src/model.js","./src/storage.js","./src/cloud.js","./assets/icon.svg","./assets/icon-192.png","./assets/icon-512.png","./manifest.webmanifest"];
+const SHELL=["./","./index.html","./styles.css","./config.js","./src/app.js","./src/model.js","./src/charts.js","./src/storage.js","./src/cloud.js","./assets/icon.svg","./assets/icon-192.png","./assets/icon-512.png","./manifest.webmanifest"];
 self.addEventListener("install",event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting()));});
 self.addEventListener("activate",event=>{event.waitUntil(caches.keys().then(names=>Promise.all(names.filter(n=>n.startsWith(PREFIX+encodeURIComponent(self.registration.scope))&&n!==CACHE).map(n=>caches.delete(n)))).then(()=>self.clients.claim()));});
 self.addEventListener("fetch",event=>{

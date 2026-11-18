@@ -1,4 +1,4 @@
-import {validateState,MAX_RECORDS,SYNC_KEY_PATTERN} from "../src/model.js";
+import {validateState,mergeStates,MAX_RECORDS,SYNC_KEY_PATTERN} from "../src/model.js";
 
 const JSON_HEADERS={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer"};
 export function allowedOrigin(request,env) {
@@ -29,7 +29,7 @@ export function checkPayload(input,now=Date.now()) {
   }
   return state;
 }
-async function readState(db,owner) {
+async function readState(db,owner,multiple=false) {
   const [records,recovery]=await db.batch([
     db.prepare("SELECT day, status, occurred_at, updated_at, mutation_id FROM records WHERE owner_id = ? ORDER BY day LIMIT ?").bind(owner,MAX_RECORDS+1),
     db.prepare("SELECT start, updated_at, mutation_id FROM recovery WHERE owner_id = ?").bind(owner)
@@ -38,7 +38,15 @@ async function readState(db,owner) {
   const entries={};
   for(const row of records.results)entries[row.day]={date:row.day,status:row.status,occurredAt:row.occurred_at,updatedAt:row.updated_at,mutationId:row.mutation_id};
   const setting=recovery.results[0];
-  return {version:1,records:entries,recovery:setting?{start:setting.start,updatedAt:setting.updated_at,mutationId:setting.mutation_id}:null};
+  const legacy={version:1,records:entries,recovery:setting?{start:setting.start,updatedAt:setting.updated_at,mutationId:setting.mutation_id}:null};
+  if(!multiple)return legacy;
+  // 旧版设备仍可能修改日记录；与独立记录按版本合并，不复活已删除的记录。
+  const rows=await db.prepare("SELECT id, day, status, occurred_at, updated_at, mutation_id FROM record_entries WHERE owner_id = ? LIMIT ?").bind(owner,MAX_RECORDS+1).all();
+  const independent={};
+  for(const row of rows.results)independent[row.id]={id:row.id,date:row.day,status:row.status,occurredAt:row.occurred_at,updatedAt:row.updated_at,mutationId:row.mutation_id};
+  const merged=mergeStates(validateState(legacy),{version:2,records:independent,recovery:null});
+  if(Object.keys(merged.records).length>MAX_RECORDS)throw new HttpError(413,"记录数量超出限制");
+  return merged;
 }
 export const RECORD_UPSERT=`INSERT INTO records (owner_id, day, status, occurred_at, updated_at, mutation_id)
 SELECT ?, json_extract(value, '$.date'), json_extract(value, '$.status'), json_extract(value, '$.occurredAt'), json_extract(value, '$.updatedAt'), json_extract(value, '$.mutationId')
@@ -49,13 +57,19 @@ export const RECOVERY_UPSERT=`INSERT INTO recovery (owner_id, start, updated_at,
 VALUES (?, ?, ?, ?)
 ON CONFLICT(owner_id) DO UPDATE SET start=excluded.start, updated_at=excluded.updated_at, mutation_id=excluded.mutation_id
 WHERE excluded.updated_at > recovery.updated_at OR (excluded.updated_at = recovery.updated_at AND excluded.mutation_id > recovery.mutation_id)`;
-async function writeState(db,owner,state) {
-  const existing=await db.prepare("SELECT day FROM records WHERE owner_id = ?").bind(owner).all();
-  const union=new Set([...existing.results.map(r=>r.day),...Object.keys(state.records)]);
+export const ENTRY_UPSERT=`INSERT INTO record_entries (owner_id, id, day, status, occurred_at, updated_at, mutation_id)
+SELECT ?, json_extract(value, '$.id'), json_extract(value, '$.date'), json_extract(value, '$.status'), json_extract(value, '$.occurredAt'), json_extract(value, '$.updatedAt'), json_extract(value, '$.mutationId')
+FROM json_each(?) WHERE true
+ON CONFLICT(owner_id, id) DO UPDATE SET day=excluded.day, status=excluded.status, occurred_at=excluded.occurred_at, updated_at=excluded.updated_at, mutation_id=excluded.mutation_id
+WHERE excluded.updated_at > record_entries.updated_at OR (excluded.updated_at = record_entries.updated_at AND excluded.mutation_id > record_entries.mutation_id)`;
+async function writeState(db,owner,state,multiple=false) {
+  const existing=multiple?Object.keys((await readState(db,owner,true)).records):
+    (await db.prepare("SELECT day FROM records WHERE owner_id = ?").bind(owner).all()).results.map(r=>`day_${r.day}`);
+  const union=new Set([...existing,...Object.keys(state.records)]);
   if(union.size>MAX_RECORDS)throw new HttpError(413,"记录数量超出限制");
   const records=Object.values(state.records),statements=[];
   // 使用 JSON 批量写入，避免每条记录消耗一次 D1 查询。
-  for(let i=0;i<records.length;i+=1000)statements.push(db.prepare(RECORD_UPSERT).bind(owner,JSON.stringify(records.slice(i,i+1000))));
+  for(let i=0;i<records.length;i+=1000)statements.push(db.prepare(multiple?ENTRY_UPSERT:RECORD_UPSERT).bind(owner,JSON.stringify(records.slice(i,i+1000))));
   if(state.recovery)statements.push(db.prepare(RECOVERY_UPSERT).bind(owner,state.recovery.start,state.recovery.updatedAt,state.recovery.mutationId));
   // 最多 40 个记录写入语句，可在免费 Worker 的查询限额内完成。
   if(statements.length)await db.batch(statements);
@@ -77,15 +91,18 @@ export default {
       if(request.method==="OPTIONS")return new Response(null,{status:204,headers:{...(origin?{"Access-Control-Allow-Origin":origin}:{}),"Access-Control-Allow-Methods":"GET, POST, OPTIONS","Access-Control-Allow-Headers":"Authorization, Content-Type","Access-Control-Max-Age":"86400",Vary:"Origin"}});
       const path=new URL(request.url).pathname;
       if(path==="/api/health"&&request.method==="GET")return responseJson({ok:true,service:"lulema"},200,origin);
-      if(!["/api/state","/api/sync"].includes(path))throw new HttpError(404,"接口不存在");
-      if((path==="/api/state"&&request.method!=="GET")||(path==="/api/sync"&&request.method!=="POST"))throw new HttpError(405,"不支持的请求方法");
+      if(!["/api/state","/api/sync","/api/v2/state","/api/v2/sync"].includes(path))throw new HttpError(404,"接口不存在");
+      const multiple=path.startsWith("/api/v2/"),sync=path.endsWith("/sync");
+      if(request.method!==(sync?"POST":"GET"))throw new HttpError(405,"不支持的请求方法");
       const owner=await ownerId(request);
       if(!env.DB)throw new HttpError(503,"D1 数据库尚未配置");
-      if(path==="/api/sync") {
+      if(sync) {
         if(!(request.headers.get("Content-Type")||"").toLowerCase().startsWith("application/json"))throw new HttpError(415,"请使用 JSON 数据格式");
-        const state=checkPayload(await limitedJson(request));await writeState(env.DB,owner,state);
+        const input=await limitedJson(request);
+        if(!multiple&&input.version!==1)throw new HttpError(400,"多次记录请使用新版同步接口");
+        const state=checkPayload(input);await writeState(env.DB,owner,state,multiple);
       }
-      return responseJson(await readState(env.DB,owner),200,origin);
+      return responseJson(await readState(env.DB,owner,multiple),200,origin);
     } catch(error) {
       if(error instanceof HttpError)return responseJson({error:error.message},error.status,origin);
       console.error("lulema database request failed",error?.name);

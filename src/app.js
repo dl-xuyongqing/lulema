@@ -1,4 +1,5 @@
-import {dateKey,parseDate,emptyState,setRecord,setRecovery,statistics,calendarDays,recoveryProgress,importBackup,createSyncKey,mergeStates,validateState} from "./model.js";
+import {dateKey,parseDate,emptyState,setRecord,editRecord,deleteRecord,recordsForDay,dailyRecords,setRecovery,statistics,calendarDays,recoveryProgress,importBackup,createSyncKey,mergeStates,validateState} from "./model.js";
+import {renderCharts} from "./charts.js";
 import {loadState,saveState,loadCloud,saveCloud,STATE_KEY} from "./storage.js";
 import {validateConnection,synchronize} from "./cloud.js";
 
@@ -6,7 +7,7 @@ const $=selector=>document.querySelector(selector);
 let state=emptyState(),connection=null,storageBlocked=false;
 try {state=loadState();} catch {storageBlocked=true;}
 try {const saved=loadCloud();if(saved)connection=validateConnection(saved);} catch {connection=null;}
-let today=dateKey(),viewDate=parseDate(today),editingDate=today;
+let today=dateKey(),viewDate=parseDate(today),editingDate=today,editingId=null,chartRange=30;
 let syncRunning=false,syncAgain=false,syncTimer=null,toastTimer=null,lastSync=null,lastError="";
 const formatMonth=new Intl.DateTimeFormat("zh-CN",{year:"numeric",month:"long"});
 const formatFull=new Intl.DateTimeFormat("zh-CN",{year:"numeric",month:"long",day:"numeric",weekday:"long"});
@@ -22,19 +23,21 @@ function render() {
   $("#current-date").textContent=formatFull.format(parseDate(today));
   $("#current-streak").textContent=summary.current;
   $("#total-days").textContent=summary.total;
+  $("#total-days-note").textContent=`分布在 ${summary.totalDays} 天`;
+  $("#reset-count").textContent=summary.resetCount;
   $("#longest-streak").textContent=summary.longest;
   $("#month-ratio").textContent=summary.ratio===null?"—":summary.ratio;
   $("#ratio-unit").textContent=summary.ratio===null?"":" %";
   $("#ratio-note").textContent=summary.monthTotal?`基于 ${summary.monthTotal} 天记录`:"记录后开始统计";
-  const status=state.records[today]?.status;
+  const entries=recordsForDay(state,today),day=dailyRecords(state,today)[today],status=day?.status;
   $("#streak-description").textContent=summary.current?"一点一滴，都是属于你的进步。":"从今天开始，找到自己的节奏。";
   $("#streak-note").textContent=!status&&summary.current?"今天还没打卡，连续天数暂计至昨天":"记录是一种照顾自己的方式";
-  document.querySelectorAll(".checkin-button").forEach(button=>{const selected=button.dataset.status===status;button.classList.toggle("selected",selected);button.setAttribute("aria-pressed",String(selected));});
-  $("#today-badge").textContent=status?"已记录":"待记录";
+  $("#today-badge").textContent=entries.length?`${entries.length} 条记录`:"待记录";
   $("#today-badge").className=`badge ${status||""}`;
-  $("#today-message").textContent=status==="clear"?"今天的记号已留下。继续好好生活。":status==="reset"?"已如实记录。给自己一点善意。":"记录只属于你，随时可以修改。";
-  $("#edit-today").hidden=!status;
-  renderCalendar();renderRecovery();renderCloud();
+  $("#today-message").textContent=entries.length?`今天已记录 ${day.resets} 次“撸了”，可以继续添加。`:"每次点击新增一条，随时可以修改。";
+  const preview=$("#today-records");preview.replaceChildren();
+  for(const record of entries.slice(0,3)) {const button=document.createElement("button");button.className=`today-record ${record.status}`;button.dataset.editRecord=record.id;button.textContent=`${record.occurredAt?new Date(record.occurredAt).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",hour12:false}):"时间未记录"} · ${record.status==="reset"?"撸了":"没撸"}`;preview.append(button);}
+  renderCalendar();renderRecovery();renderCharts(state,today,chartRange);renderCloud();
 }
 function renderCalendar() {
   const year=viewDate.getFullYear(),month=viewDate.getMonth();
@@ -45,14 +48,15 @@ function renderCalendar() {
   $("#next-month").disabled=monthKey>=today.slice(0,7);
   $("#previous-month").disabled=year<=1900&&month===0;
   $("#back-current-month").hidden=monthKey===today.slice(0,7);
-  const {offset,days}=calendarDays(year,month),grid=$("#calendar-grid");
+  const {offset,days}=calendarDays(year,month),grid=$("#calendar-grid"),daily=dailyRecords(state,today);
   grid.replaceChildren();
   for(let i=0;i<offset;i++){const blank=document.createElement("div");blank.className="calendar-blank";grid.append(blank);}
   for(const date of days) {
-    const status=state.records[date]?.status,button=document.createElement("button");
+    const day=daily[date],status=day?.status,button=document.createElement("button");
     button.className=`calendar-day ${status||""}${date===today?" today":""}`;
     button.textContent=Number(date.slice(-2));button.dataset.date=date;button.disabled=date>today;
-    button.setAttribute("aria-label",`${date}${date===today?"，今天":""}，${status==="clear"?"没撸":status==="reset"?"撸了":"未记录"}`);
+    if(day){const count=document.createElement("small");count.className="day-count";count.textContent=day.resets?`${day.resets}次`:`${day.count}条`;button.append(count);}
+    button.setAttribute("aria-label",`${date}${date===today?"，今天":""}，${day?`${day.count}条记录，撸了${day.resets}次`:"未记录"}`);
     if(date===today)button.setAttribute("aria-current","date");
     grid.append(button);
   }
@@ -61,12 +65,19 @@ function renderRecovery() {
   const info=recoveryProgress(state);
   $("#time-ring").style.setProperty("--progress",`${info.progress*360}deg`);
   const hours=Math.floor(info.hours);
-  $("#elapsed-value").textContent=info.start?(hours>=24?`${Math.floor(hours/24)}天 ${hours%24}h`:`${hours}h`):"—";
-  $("#elapsed-unit").textContent=info.start?"已经走过的时间":"等待一条记录";
+  const minutes=Math.floor(info.hours*60)%60;
+  $("#energy-percent").textContent=info.start?`${Math.floor(info.progress*100)}%`:"—";
+  $("#energy-fill").style.height=`${info.progress*100}%`;
+  $("#elapsed-value").textContent=info.start?(hours>=24?`${Math.floor(hours/24)}天 ${hours%24}小时`:`${hours}小时 ${minutes}分钟`):"—";
+  $("#elapsed-unit").textContent=info.start?"距离上次记录":"等待一条记录";
   $("#recovery-caption").textContent=info.start?`${info.manual?"手动起点":"上次记录"} · ${formatShort.format(new Date(info.start))}`:"记录一次“撸了”后，这里会开始计时。";
+  const stages=["刚刚启程","一天小憩","两日积累","三日从容","五日里程碑"];
+  $("#energy-stage").textContent=info.start?stages[info.stage]:"等待启程";
+  $("#energy-next").textContent=!info.start?"记录后自动开始":info.nextHours?`下一节点还需 ${Math.ceil(info.nextHours)} 小时`:"已走过 120 小时";
+  document.querySelectorAll("[data-milestone]").forEach(el=>{el.classList.toggle("reached",Boolean(info.start)&&info.hours>=Number(el.dataset.milestone));el.classList.toggle("current",Boolean(info.start)&&Number(el.dataset.milestone)===[0,24,48,72,120][info.stage]);});
   const svg=$("#recovery-chart"),points=Array.from({length:6},(_,i)=>`${10+i*52},${70-i*12}`).join(" ");
   const x=10+info.progress*260,y=70-info.progress*60;
-  svg.innerHTML=`<path d="M10 70H270" stroke="#e3ebd7"/><polyline points="${points}" stroke="#a0b68b" stroke-width="2"/><circle cx="${x}" cy="${y}" r="4" fill="#6d8d55" stroke="white" stroke-width="2"/>`;
+  svg.innerHTML=`<title>0 至 120 小时的计时进度，当前 ${Math.floor(info.progress*100)}%</title><path d="M10 70H270" stroke="#e3ebd7"/><polyline points="${points}" stroke="#a0b68b" stroke-width="2"/>${info.start?`<circle cx="${x}" cy="${y}" r="4" fill="#6d8d55" stroke="white" stroke-width="2"/>`:""}`;
 }
 function renderCloud() {
   const badge=$("#sync-status"),label=$("#sync-label"),detail=$("#cloud-detail");
@@ -77,14 +88,27 @@ function renderCloud() {
   $("#cloud-connected").hidden=!connection;$("#sync-now").disabled=syncRunning;$("#connect-cloud").disabled=syncRunning;
 }
 function showDialog(selector) {const dialog=$(selector);if(!dialog.open)dialog.showModal();}
-function openDay(date) {
-  editingDate=date;
-  const record=state.records[date];$("#day-dialog-title").textContent=`${Number(date.slice(5,7))}月${Number(date.slice(8))}日的小记号`;
+function openDay(date,id=null) {
+  editingDate=date;editingId=id;
+  const record=id?state.records[id]:null;$("#day-dialog-title").textContent=`${Number(date.slice(5,7))}月${Number(date.slice(8))}日的记录`;
+  const list=$("#day-records"),entries=recordsForDay(state,date);list.replaceChildren();
+  $("#day-list-summary").textContent=entries.length?`共 ${entries.length} 条 · 撸了 ${entries.filter(r=>r.status==="reset").length} 次`:"当天还没有记录，添加第一条吧。";
+  for(const entry of entries) {
+    const row=document.createElement("div");row.className=`record-row ${entry.status}${entry.id===id?" editing":""}`;
+    const label=document.createElement("span");label.textContent=`${entry.status==="reset"?"撸了":"没撸"} · ${entry.occurredAt?new Date(entry.occurredAt).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",hour12:false}):"时间未记录"}`;
+    const actions=document.createElement("div"),edit=document.createElement("button"),remove=document.createElement("button");
+    edit.type=remove.type="button";edit.className="text-button";remove.className="text-button danger";
+    edit.dataset.editRecord=entry.id;remove.dataset.deleteRecord=entry.id;edit.textContent="修改";remove.textContent="删除";
+    edit.setAttribute("aria-label",`修改${label.textContent}`);remove.setAttribute("aria-label",`删除${label.textContent}`);
+    actions.append(edit,remove);row.append(label,actions);list.append(row);
+  }
+  $("#record-editor-title").textContent=id?"修改这条记录":"添加一条记录";
+  $("#cancel-record-edit").hidden=!id;
   $("#day-form").reset();
   if(record?.status)$( `#day-form input[value="${record.status}"]`).checked=true;
   const at=record?.occurredAt?new Date(record.occurredAt):date===today?new Date():new Date(`${date}T12:00:00`);
   $("#day-time").value=`${String(at.getHours()).padStart(2,"0")}:${String(at.getMinutes()).padStart(2,"0")}`;
-  $("#day-time-field").hidden=record?.status!=="reset";
+  $("#day-time-field").hidden=false;
   $("#delete-day").hidden=!record?.status;
   showDialog("#day-dialog");
 }
@@ -112,6 +136,8 @@ async function syncNow({feedback=false}={}) {
 }
 document.addEventListener("click",event=>{
   const closer=event.target.closest("[data-close]");if(closer){closer.closest("dialog").close();return;}
+  const edit=event.target.closest("[data-edit-record]");if(edit){const record=state.records[edit.dataset.editRecord];if(record)openDay(record.date,record.id);return;}
+  const remove=event.target.closest("[data-delete-record]");if(remove){if(commit(deleteRecord(state,remove.dataset.deleteRecord))){openDay(editingDate);toast("已删除这条记录。");}return;}
   const button=event.target.closest("[data-action]");if(!button)return;
   if(button.dataset.action==="settings")openSettings();
   if(button.dataset.action==="edit-today")openDay(today);
@@ -119,21 +145,22 @@ document.addEventListener("click",event=>{
 });
 document.querySelectorAll("dialog").forEach(dialog=>dialog.addEventListener("click",event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}}));
 document.querySelectorAll(".checkin-button").forEach(button=>button.addEventListener("click",()=>{
-  const status=button.dataset.status;if(state.records[today]?.status===status){toast("今天已经记录过了，可以点“修改记录”调整。");return;}
-  if(commit(setRecord(state,today,status,status==="reset"?new Date().toISOString():null)))toast(status==="clear"?"今天的记号已留下。":"已如实记录，好好照顾自己。");
+  const status=button.dataset.status;
+  try{if(commit(setRecord(state,today,status,new Date().toISOString())))toast(status==="clear"?"新增一条“没撸”记录。":`新增一条“撸了”记录，今天共 ${recordsForDay(state,today).filter(r=>r.status==="reset").length} 次。`);}catch(error){toast(error.message,true);}
 }));
 $("#calendar-grid").addEventListener("click",event=>{const button=event.target.closest("[data-date]");if(button&&!button.disabled)openDay(button.dataset.date);});
 $("#previous-month").addEventListener("click",()=>{viewDate=new Date(viewDate.getFullYear(),viewDate.getMonth()-1,1,12);renderCalendar();});
 $("#next-month").addEventListener("click",()=>{viewDate=new Date(viewDate.getFullYear(),viewDate.getMonth()+1,1,12);renderCalendar();});
 $("#back-current-month").addEventListener("click",()=>{viewDate=parseDate(today);renderCalendar();});
-$("#day-form").addEventListener("change",()=>{$("#day-time-field").hidden=new FormData($("#day-form")).get("status")!=="reset";});
+$("#cancel-record-edit").addEventListener("click",()=>openDay(editingDate));
+$("#chart-range").addEventListener("click",event=>{const button=event.target.closest("[data-range]");if(!button)return;chartRange=Number(button.dataset.range);document.querySelectorAll("[data-range]").forEach(el=>el.setAttribute("aria-pressed",String(el===button)));renderCharts(state,today,chartRange);});
 $("#day-form").addEventListener("submit",event=>{
   event.preventDefault();const status=new FormData(event.target).get("status");
-  const occurredAt=status==="reset"?new Date(`${editingDate}T${$("#day-time").value||"12:00"}:00`):null;
+  const occurredAt=new Date(`${editingDate}T${$("#day-time").value||"12:00"}:00`);
   if(occurredAt&&occurredAt.getTime()>Date.now()){toast("记录时间不能晚于现在。",true);return;}
-  if(commit(setRecord(state,editingDate,status,occurredAt?.toISOString()||null))){$("#day-dialog").close();toast("当天记录已保存。");}
+  try{const next=editingId?editRecord(state,editingId,editingDate,status,occurredAt.toISOString()):setRecord(state,editingDate,status,occurredAt.toISOString());if(commit(next)){openDay(editingDate);toast("记录已保存，可以继续添加。");}}catch(error){toast(error.message,true);}
 });
-$("#delete-day").addEventListener("click",()=>{if(commit(setRecord(state,editingDate,null))){$("#day-dialog").close();toast("已删除当天记录。");}});
+$("#delete-day").addEventListener("click",()=>{if(editingId&&commit(deleteRecord(state,editingId))){openDay(editingDate);toast("已删除这条记录。");}});
 $("#recovery-form").addEventListener("submit",event=>{event.preventDefault();const start=new Date($("#recovery-start").value);if(!Number.isFinite(start.getTime())||start.getTime()>Date.now()){toast("请选择有效的过去时间。",true);return;}if(commit(setRecovery(state,start.toISOString()))){$("#recovery-dialog").close();toast("计时起点已更新。");}});
 $("#reset-recovery").addEventListener("click",()=>{if(commit(setRecovery(state,null))){$("#recovery-dialog").close();toast("计时已跟随最近一次记录。");}});
 $("#generate-key").addEventListener("click",()=>{if($("#sync-key").value&&!confirm("生成新密钥会打开另一份云端空间。旧空间只能通过旧密钥访问，请先保留原密钥。继续生成？"))return;$("#sync-key").value=createSyncKey();$("#sync-key").type="text";$("#toggle-key").textContent="隐藏";toast("密钥已生成，请复制并妥善备份。");});
@@ -159,8 +186,8 @@ $("#import-data").addEventListener("click",()=>$("#import-file").click());
 $("#import-file").addEventListener("change",async event=>{
   const file=event.target.files[0];if(!file)return;
   try{if(file.size>8_000_000)throw new Error("备份文件过大");const backup=validateState(JSON.parse(await file.text())),count=Object.values(backup.records).filter(r=>r.status).length;
-    if(!confirm(`导入 ${count} 天记录？不同日期会合并，相同日期以备份为准。建议先导出当前记录。`))return;
-    const next=importBackup(state,backup,today);if(commit(next))toast(`已导入 ${count} 天记录。`);
+    if(!confirm(`导入 ${count} 条记录？不同记录会合并，同一条记录以备份为准。建议先导出当前记录。`))return;
+    const next=importBackup(state,backup,today);if(commit(next))toast(`已导入 ${count} 条记录。`);
   }catch(error){toast(`导入失败：${error.message}`,true);}finally{event.target.value="";}
 });
 window.addEventListener("online",()=>{lastError="";scheduleSync(100);renderCloud();});
