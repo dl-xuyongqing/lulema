@@ -27,6 +27,15 @@ try {
   async function wait(page,expression){for(let i=0;i<100;i++){if(await page.eval(expression))return;await pause(100);}throw new Error(`UI condition failed: ${expression}`);}
   const desktop=await page(1440,1000);await desktop.navigate();
   assert.equal(await desktop.eval("document.documentElement.scrollWidth <= innerWidth"),true);
+  assert.equal(await desktop.eval("document.querySelectorAll('#statistics-section .chart-card').length"),1);
+  assert.equal(await desktop.eval("document.querySelector('#statistics-chart').dataset.chartType"),"line");
+  assert.equal(await desktop.eval("document.querySelector('#statistics-chart .chart-line').getAttribute('d')"),"");
+  // 即使旧配置仍存在，也不再预填作者的地址；重新打开设置仍为空。
+  await desktop.eval("window.LULEMA_CONFIG={apiUrl:'https://example.workers.dev'};document.querySelector('[data-action=settings]').click()");
+  assert.equal(await desktop.eval("document.querySelector('#api-url').value"),"");
+  await desktop.eval("document.querySelector('#api-url').value='https://example.workers.dev';document.querySelector('#settings-dialog').close();document.querySelector('[data-action=settings]').click()");
+  assert.equal(await desktop.eval("document.querySelector('#api-url').value"),"");
+  await desktop.eval("document.querySelector('#settings-dialog').close()");
   await desktop.screenshot("desktop-empty.png");
   await desktop.eval("document.querySelector('[data-status=clear]').click()");await wait(desktop,"document.querySelector('#current-streak').textContent === '1'");
   await desktop.eval("location.reload()");await wait(desktop,"document.querySelector('#current-streak').textContent === '1'");
@@ -47,6 +56,9 @@ try {
   const key=await desktop.eval("document.querySelector('[data-action=settings]').click();document.querySelector('#generate-key').click();document.querySelector('#sync-key').value");
   await desktop.eval("document.querySelector('#api-url').value='http://127.0.0.1:8787';document.querySelector('#cloud-form').requestSubmit()");
   await wait(desktop,"document.querySelector('#cloud-detail').textContent.startsWith('已同步')");await desktop.eval("document.querySelector('#settings-dialog').close()");
+  await desktop.eval("document.querySelector('[data-action=settings]').click()");
+  assert.equal(await desktop.eval("document.querySelector('#api-url').value"),"http://127.0.0.1:8787");
+  await desktop.eval("document.querySelector('#settings-dialog').close()");
   // 模拟已有浏览器中的 v1 数据，升级后原记录仍可编辑并继续新增。
   const legacyPage=await page(360,800,true);await legacyPage.navigate();
   await legacyPage.eval(`(()=>{const date=new Date(),day=date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0')+'-'+String(date.getDate()).padStart(2,'0');localStorage.setItem('lulema:state:v1',JSON.stringify({version:1,records:{[day]:{date:day,status:'clear',occurredAt:null,updatedAt:1,mutationId:'legacy_ui_01'}},recovery:null}));location.reload();})()`);
@@ -74,12 +86,40 @@ try {
   await importFile(desktop,seeded);const total=await desktop.eval("document.querySelector('#total-days').textContent");await importFile(desktop,seeded);await pause(400);assert.equal(await desktop.eval("document.querySelector('#total-days').textContent"),total);
   await desktop.eval("document.querySelectorAll('[data-range]')[0].click()");assert.equal(await desktop.eval("document.querySelector('#chart-data').children.length"),7);
   await desktop.eval("document.querySelectorAll('[data-range]')[2].click()");assert.equal(await desktop.eval("document.querySelector('#chart-data').children.length"),90);await desktop.eval("document.querySelectorAll('[data-range]')[1].click()");
+  // 折线只连接相邻且已记录的日期，零次和未记录在明细中保持区别。
+  assert.equal(await desktop.eval(`(()=>{const rows=Array.from(document.querySelectorAll('#chart-data tr')),known=rows.map(row=>row.cells[1].textContent!=='未记录'),path=document.querySelector('.chart-line').getAttribute('d');return (path.match(/M/g)||[]).length===known.filter((v,i)=>v&&!known[i-1]).length&&(path.match(/L/g)||[]).length===known.filter((v,i)=>v&&known[i-1]).length&&rows.some(row=>row.cells[1].textContent==='0 次')&&rows.some(row=>row.cells[1].textContent==='未记录');})()`),true);
+  const rangeTotal=await desktop.eval(`(async()=>{const m=await import('./src/model.js'),state=m.validateState(JSON.parse(localStorage.getItem('lulema:state:v1')));return m.chartStatistics(state,m.dateKey(),30).total;})()`);
+  for(const [dimension,rows] of [["weekday",7],["period",4],["monthly",6]]) {
+    await desktop.eval(`document.querySelector('[data-dimension=${dimension}]').click()`);
+    assert.equal(await desktop.eval("document.querySelector('#chart-data').children.length"),rows);
+    assert.equal(await desktop.eval("document.querySelector('#statistics-chart').dataset.chartType"),dimension==="monthly"?"line":"bar");
+    if(dimension!=="monthly")assert.equal(await desktop.eval("Array.from(document.querySelectorAll('#chart-data tr')).reduce((sum,row)=>sum+parseInt(row.cells[1].textContent),0)"),rangeTotal);
+    else {
+      assert.equal(await desktop.eval("document.querySelector('#chart-range').hidden && !document.querySelector('#chart-month-range').hidden"),true);
+      assert.equal(await desktop.eval(`(async()=>{const m=await import('./src/model.js'),state=m.validateState(JSON.parse(localStorage.getItem('lulema:state:v1'))),stats=m.chartStatistics(state,m.dateKey(),30),total=stats.months.reduce((sum,month)=>sum+month.count,0),days=stats.months.reduce((sum,month)=>sum+month.days,0);return document.querySelector('#chart-summary').textContent==='最近 6 个月 · 撸了 '+total+' 次 · '+days+' 天有记录';})()`),true);
+    }
+    await desktop.eval("document.querySelector('#chart-type [data-chart-type=line]').click()");
+    assert.equal(await desktop.eval("document.querySelector('#statistics-chart').dataset.chartType"),"line");
+    await desktop.eval("document.querySelector('#chart-type [data-chart-type=bar]').click()");
+    assert.equal(await desktop.eval("document.querySelector('#statistics-chart').dataset.chartType"),"bar");
+    await desktop.eval("document.querySelector('[data-chart-index=\"0\"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))");
+    assert.equal(await desktop.eval("document.querySelector('#chart-point-detail').textContent === document.querySelector('#chart-data tr').cells[0].textContent+' · '+document.querySelector('#chart-data tr').cells[1].textContent"),true);
+  }
+  await desktop.eval("document.querySelector('[data-dimension=daily]').click()");
+  assert.equal(await desktop.eval("!document.querySelector('#chart-range').hidden && document.querySelector('[data-range=\"30\"]').getAttribute('aria-pressed') === 'true' && document.querySelector('#chart-data').children.length === 30"),true);
   await desktop.eval("document.querySelector('[data-action=recovery]').click();document.querySelector('#recovery-start').value=(()=>{const d=new Date(Date.now()-60*3600000);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+'T'+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');})();document.querySelector('#recovery-form').requestSubmit()");
   assert.equal(await desktop.eval("document.querySelector('#energy-stage').textContent"),"两日积累");
   await wait(desktop,"document.querySelector('#sync-label').textContent === '云端已连接'");await pause(900);
   await mobile.eval("document.querySelector('[data-action=settings]').click();document.querySelector('#sync-now').click()");await wait(mobile,`document.querySelector('#total-days').textContent === '${total}' && document.querySelector('#cloud-detail').textContent.startsWith('已同步')`);await mobile.eval("document.querySelector('#settings-dialog').close()");
   assert.equal(await mobile.eval("document.documentElement.scrollWidth <= innerWidth"),true);
+  for(const dimension of ["weekday","period","monthly","daily"]){await mobile.eval(`document.querySelector('[data-dimension=${dimension}]').click()`);assert.equal(await mobile.eval("document.documentElement.scrollWidth <= innerWidth"),true);}
+  await mobile.eval("document.querySelector('[data-chart-index=\"0\"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))");
+  assert.equal(await mobile.eval("document.querySelector('#chart-point-detail').textContent.includes(' · ')"),true);
   await desktop.screenshot("desktop.png");await mobile.screenshot("mobile.png");
   await mobile.eval("document.querySelector('[data-action=edit-today]').click()");await mobile.screenshot("mobile-records.png");
-  assert.deepEqual(errors,[]);console.log("Browser checks passed: repeated same-day entries, single-entry edits/deletes, chart ranges, backup import idempotence, time milestones, desktop/mobile, persistence, two-device D1 sync, deletion sync, offline reload and reconnection. Screenshots: artifacts/desktop.png, artifacts/mobile.png");
+  await mobile.eval("document.querySelector('#day-dialog').close();document.querySelector('[data-action=settings]').click();document.querySelector('#disconnect-cloud').click()");
+  assert.equal(await mobile.eval("document.querySelector('#api-url').value === '' && localStorage.getItem('lulema:cloud:v1') === null"),true);
+  await mobile.eval("document.querySelector('#settings-dialog').close();document.querySelector('[data-action=settings]').click()");
+  assert.equal(await mobile.eval("document.querySelector('#api-url').value"),"");
+  assert.deepEqual(errors,[]);console.log("Browser checks passed: unified chart, dimensions/types/ranges, missing-data gaps, matching totals/details, point selection, blank cloud address and saved/disconnected settings, repeated entries, edits/deletes, backups, desktop/mobile, D1 sync and offline reconnection. Screenshots: artifacts/desktop.png, artifacts/mobile.png");
 } finally {if(ws?.readyState===1){try{ws.send(JSON.stringify({id:999999,method:"Browser.close"}));}catch{}ws.close();}chrome.kill();await new Promise(resolve=>api.close(resolve));db.close();}

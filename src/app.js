@@ -7,7 +7,7 @@ const $=selector=>document.querySelector(selector);
 let state=emptyState(),connection=null,storageBlocked=false;
 try {state=loadState();} catch {storageBlocked=true;}
 try {const saved=loadCloud();if(saved)connection=validateConnection(saved);} catch {connection=null;}
-let today=dateKey(),viewDate=parseDate(today),editingDate=today,editingId=null,chartRange=30;
+let today=dateKey(),viewDate=parseDate(today),editingDate=today,editingId=null,chartRange=30,chartDimension="daily",chartType="line";
 let syncRunning=false,syncAgain=false,syncTimer=null,toastTimer=null,lastSync=null,lastError="";
 const formatMonth=new Intl.DateTimeFormat("zh-CN",{year:"numeric",month:"long"});
 const formatFull=new Intl.DateTimeFormat("zh-CN",{year:"numeric",month:"long",day:"numeric",weekday:"long"});
@@ -37,8 +37,9 @@ function render() {
   $("#today-message").textContent=entries.length?`今天已记录 ${day.resets} 次“撸了”，可以继续添加。`:"每次点击新增一条，随时可以修改。";
   const preview=$("#today-records");preview.replaceChildren();
   for(const record of entries.slice(0,3)) {const button=document.createElement("button");button.className=`today-record ${record.status}`;button.dataset.editRecord=record.id;button.textContent=`${record.occurredAt?new Date(record.occurredAt).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",hour12:false}):"时间未记录"} · ${record.status==="reset"?"撸了":"没撸"}`;preview.append(button);}
-  renderCalendar();renderRecovery();renderCharts(state,today,chartRange);renderCloud();
+  renderCalendar();renderRecovery();renderStatistics();renderCloud();
 }
+function renderStatistics() {renderCharts(state,today,chartRange,chartDimension,chartType);}
 function renderCalendar() {
   const year=viewDate.getFullYear(),month=viewDate.getMonth();
   const monthKey=`${year}-${String(month+1).padStart(2,"0")}`;
@@ -114,7 +115,7 @@ function openDay(date,id=null) {
 }
 function localDateTime(date) {return `${dateKey(date)}T${String(date.getHours()).padStart(2,"0")}:${String(date.getMinutes()).padStart(2,"0")}`;}
 function openRecovery() {$("#recovery-start").value=localDateTime(new Date(recoveryProgress(state).start||Date.now()));$("#recovery-start").max=localDateTime(new Date());showDialog("#recovery-dialog");}
-function openSettings() {$("#api-url").value=connection?.apiUrl||window.LULEMA_CONFIG?.apiUrl||"";$("#sync-key").value=connection?.key||"";$("#sync-key").type="password";$("#toggle-key").textContent="显示";renderCloud();showDialog("#settings-dialog");}
+function openSettings() {$("#api-url").value=connection?.apiUrl||"";$("#sync-key").value=connection?.key||"";$("#sync-key").type="password";$("#toggle-key").textContent="显示";renderCloud();showDialog("#settings-dialog");}
 function scheduleSync(delay=700) {if(!connection)return;clearTimeout(syncTimer);syncTimer=setTimeout(()=>syncNow(),delay);}
 async function syncNow({feedback=false}={}) {
   if(!connection||storageBlocked)return false;
@@ -153,7 +154,10 @@ $("#previous-month").addEventListener("click",()=>{viewDate=new Date(viewDate.ge
 $("#next-month").addEventListener("click",()=>{viewDate=new Date(viewDate.getFullYear(),viewDate.getMonth()+1,1,12);renderCalendar();});
 $("#back-current-month").addEventListener("click",()=>{viewDate=parseDate(today);renderCalendar();});
 $("#cancel-record-edit").addEventListener("click",()=>openDay(editingDate));
-$("#chart-range").addEventListener("click",event=>{const button=event.target.closest("[data-range]");if(!button)return;chartRange=Number(button.dataset.range);document.querySelectorAll("[data-range]").forEach(el=>el.setAttribute("aria-pressed",String(el===button)));renderCharts(state,today,chartRange);});
+$("#chart-range").addEventListener("click",event=>{const button=event.target.closest("[data-range]");if(!button)return;chartRange=Number(button.dataset.range);document.querySelectorAll("[data-range]").forEach(el=>el.setAttribute("aria-pressed",String(el===button)));renderStatistics();});
+$("#chart-dimension").addEventListener("click",event=>{const button=event.target.closest("[data-dimension]");if(!button||button.dataset.dimension===chartDimension)return;chartDimension=button.dataset.dimension;chartType=["daily","monthly"].includes(chartDimension)?"line":"bar";renderStatistics();});
+$("#chart-type").addEventListener("click",event=>{const button=event.target.closest("[data-chart-type]");if(!button)return;chartType=button.dataset.chartType;renderStatistics();});
+if("ResizeObserver" in window){let chartWidth=0;new ResizeObserver(entries=>{const width=Math.round(entries[0].contentRect.width);if(width!==chartWidth){chartWidth=width;renderStatistics();}}).observe($("#chart-plot"));}
 $("#day-form").addEventListener("submit",event=>{
   event.preventDefault();const status=new FormData(event.target).get("status");
   const occurredAt=new Date(`${editingDate}T${$("#day-time").value||"12:00"}:00`);
@@ -176,7 +180,7 @@ $("#cloud-form").addEventListener("submit",async event=>{
   if(!success&&connection===next){connection=previous;try{saveCloud(previous);}catch{}renderCloud();}
 });
 $("#sync-now").addEventListener("click",()=>syncNow({feedback:true}));
-$("#disconnect-cloud").addEventListener("click",()=>{try{saveCloud(null);}catch{toast("无法保存连接设置。",true);return;}connection=null;lastSync=null;lastError="";clearTimeout(syncTimer);renderCloud();toast("已断开云端，本机与云端记录均保留。");});
+$("#disconnect-cloud").addEventListener("click",()=>{try{saveCloud(null);}catch{toast("无法保存连接设置。",true);return;}connection=null;lastSync=null;lastError="";clearTimeout(syncTimer);$("#api-url").value="";$("#sync-key").value="";renderCloud();toast("已断开云端，本机与云端记录均保留。");});
 $("#export-data").addEventListener("click",()=>{
   if(storageBlocked){const raw=localStorage.getItem(STATE_KEY);if(raw)download(raw,`lulema-original-${today}.json`);else toast("本机原始记录暂时无法读取。",true);return;}
   download(JSON.stringify({...state,exportedAt:new Date().toISOString()},null,2),`lulema-backup-${today}.json`);toast("备份已导出，不包含同步密钥。");
