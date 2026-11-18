@@ -1,0 +1,43 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {DatabaseSync} from "node:sqlite";
+import {readFileSync} from "node:fs";
+import worker,{ownerId,checkPayload} from "../worker/api.js";
+import {emptyState,setRecord,setRecovery,createSyncKey} from "../src/model.js";
+class D1 {
+  constructor(){this.db=new DatabaseSync(":memory:");this.db.exec(readFileSync(new URL("../worker/migrations/0001_initial.sql",import.meta.url),"utf8"));}
+  prepare(sql){const db=this.db;return {bind(...params){return {async all(){return {results:db.prepare(sql).all(...params)};},async first(){return db.prepare(sql).get(...params)||null;},query(){return {results:db.prepare(sql).all(...params)};}};}};}
+  async batch(queries){this.db.exec("BEGIN");try{const result=queries.map(q=>q.query());this.db.exec("COMMIT");return result;}catch(error){this.db.exec("ROLLBACK");throw error;}}
+}
+function setup(){const db=new D1(),key=createSyncKey(),env={DB:db,ALLOWED_ORIGINS:"https://dl-xuyongqing.github.io"};
+  async function call(path,body,customKey=key,origin="https://dl-xuyongqing.github.io"){
+    return worker.fetch(new Request(`https://api.example${path}`,{method:body?"POST":"GET",headers:{Origin:origin,Authorization:`Bearer ${customKey}`,"Content-Type":"application/json"},...(body?{body:JSON.stringify(body)}:{})}),env);
+  }return {db,key,env,call};
+}
+test("真实 SQLite 执行迁移和批量写入，用户空间隔离",async()=>{
+  const {call,db,key}=setup();let s=setRecord(emptyState(),"2026-11-01","clear",null,1);s=setRecord(s,"2026-11-02","reset","2026-11-02T08:00:00Z",2);s=setRecovery(s,"2026-11-01T00:00:00Z",3);
+  const res=await call("/api/sync",s);assert.equal(res.status,200);assert.deepEqual(await res.json(),s);
+  const another=await call("/api/state",null,createSyncKey());assert.deepEqual(await another.json(),emptyState());
+  const owner=await ownerId(new Request("https://api.example",{headers:{Authorization:`Bearer ${key}`}}));assert.equal(owner.length,64);assert.notEqual(owner,key);
+  assert.equal(db.db.prepare("SELECT owner_id FROM records LIMIT 1").get().owner_id,owner);
+});
+test("重复上传幂等，旧记录不覆盖新修改或删除",async()=>{
+  const {call}=setup(),old=setRecord(emptyState(),"2026-11-01","clear",null,1),removed=setRecord(old,"2026-11-01",null,null,2);
+  await call("/api/sync",old);await call("/api/sync",removed);const repeated=await call("/api/sync",old);assert.deepEqual(await repeated.json(),removed);
+  assert.deepEqual(await (await call("/api/sync",removed)).json(),removed);
+});
+test("大量记录通过 JSON 批量写入，跨批次保持完整",async()=>{
+  const {call}=setup();let s=emptyState();
+  for(let i=0;i<1100;i++){const date=new Date(2020,0,i+1,12),day=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;s.records[day]={date:day,status:"clear",occurredAt:null,updatedAt:i,mutationId:`record_${String(i).padStart(5,"0")}`};}
+  const result=await call("/api/sync",s);assert.equal(result.status,200);assert.equal(Object.keys((await result.json()).records).length,1100);
+});
+test("跨域、密钥、输入和方法检查",async()=>{
+  const {call,env}=setup();assert.equal((await call("/api/state",null,"bad-key")).status,401);assert.equal((await call("/api/state",null,createSyncKey(),"https://untrusted.example")).status,403);
+  const bad=await call("/api/sync",{version:1,records:{"2026-11-01":{status:"oops"}}});assert.equal(bad.status,400);
+  const preflight=await worker.fetch(new Request("https://api.example/api/state",{method:"OPTIONS",headers:{Origin:"https://dl-xuyongqing.github.io"}}),env);assert.equal(preflight.status,204);assert.equal(preflight.headers.get("Access-Control-Allow-Origin"),"https://dl-xuyongqing.github.io");
+  assert.equal((await call("/api/health")).status,200);assert.equal((await call("/unknown")).status,404);assert.equal((await call("/api/state",emptyState())).status,405);
+});
+test("数据库未配置和超前设备时钟有明确错误",async()=>{
+  const req=new Request("https://api.example/api/state",{headers:{Authorization:`Bearer ${createSyncKey()}`}});const res=await worker.fetch(req,{});assert.equal(res.status,503);
+  const s=setRecord(emptyState(),"2026-11-01","clear",null,1000000);assert.throws(()=>checkPayload(s,0),/设备时间/);
+});
