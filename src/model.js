@@ -57,13 +57,20 @@ export function nextMutation(state, now=Date.now()) {
   return {updatedAt:Math.max(now,newest+1),mutationId:crypto.randomUUID()};
 }
 export function setRecord(state,date,status,occurredAt=null,now=Date.now()) {
-  if(!["clear","reset"].includes(status)) throw new Error("请选择记录状态");
+  if(status!=="reset") throw new Error("只需要记录“撸了”，没撸会按日期自动统计");
   if(Object.keys(state.records).length>=MAX_RECORDS) throw new Error("记录空间已满，请先导出备份");
   return editRecord(state,crypto.randomUUID(),date,status,occurredAt,now);
 }
 export function editRecord(state,id,date,status,occurredAt=null,now=Date.now()) {
+  if(status!=="reset"&&status!==null) throw new Error("只需要记录“撸了”，没撸会按日期自动统计");
   const record=validateRecord({id,date,status,occurredAt:status===null?null:occurredAt,...nextMutation(state,now)});
+  validateRecordTime(record);
   return {...state,records:{...state.records,[id]:record}};
+}
+export function validateRecordTime(record,now=Date.now(),today=dateKey(new Date(now))) {
+  if(record.status!=="reset")return;
+  if(record.date>today)throw new Error("不能记录未来日期");
+  if(Date.parse(record.occurredAt)>now)throw new Error("记录时间不能晚于现在");
 }
 export function deleteRecord(state,id,now=Date.now()) {
   const record=state.records[id];
@@ -71,46 +78,51 @@ export function deleteRecord(state,id,now=Date.now()) {
   return editRecord(state,id,record.date,null,null,now);
 }
 export function recordsForDay(state,date) {
-  return Object.values(state.records).filter(r=>r.date===date&&r.status!==null).sort((a,b)=>(Date.parse(b.occurredAt)||0)-(Date.parse(a.occurredAt)||0)||b.id.localeCompare(a.id));
+  const now=Date.now();
+  return Object.values(state.records).filter(r=>r.date===date&&r.status==="reset"&&r.date<=dateKey(new Date(now))&&Date.parse(r.occurredAt)<=now).sort((a,b)=>Date.parse(b.occurredAt)-Date.parse(a.occurredAt)||b.id.localeCompare(a.id));
 }
 export function dailyRecords(state,today=dateKey()) {
-  const days={};
+  const days={},now=Date.now();
   for(const r of Object.values(state.records)) {
-    if(r.status===null||r.date>today)continue;
-    const day=days[r.date]||={date:r.date,status:"clear",count:0,resets:0};
-    day.count++;
-    if(r.status==="reset"){day.status="reset";day.resets++;}
+    if(r.status!=="reset"||r.date>today||Date.parse(r.occurredAt)>now)continue;
+    const day=days[r.date]||={date:r.date,status:"reset",count:0,resets:0,firstOccurredAt:r.occurredAt};
+    day.count++;day.resets++;
+    if(Date.parse(r.occurredAt)<Date.parse(day.firstOccurredAt))day.firstOccurredAt=r.occurredAt;
   }
   return days;
 }
 export function setRecovery(state,start,now=Date.now()) {
   return {...state,recovery:validateRecovery({start,...nextMutation(state,now)})};
 }
+// 用 UTC 的日历日期求天数，避免本地夏令时把一天算成 23 或 25 小时。
+function daysBetween(start,end) {return Math.round((Date.parse(`${end}T00:00:00Z`)-Date.parse(`${start}T00:00:00Z`))/86400000);}
+function monthCoverage(firstDate,today,month) {
+  if(!firstDate)return 0;
+  const date=parseDate(`${month}-01`);date.setMonth(date.getMonth()+1);date.setDate(0);
+  const start=firstDate>`${month}-01`?firstDate:`${month}-01`,end=today<dateKey(date)?today:dateKey(date);
+  return start<=end?daysBetween(start,end)+1:0;
+}
 export function statistics(state,today=dateKey(),month=today.slice(0,7)) {
-  const days=dailyRecords(state,today),records=Object.values(days).sort((a,b)=>a.date.localeCompare(b.date));
-  let longest=0,run=0,previous=null;
-  for (const record of records) {
-    if (record.status==="clear") {run=previous&&shiftDate(previous,1)===record.date?run+1:1;longest=Math.max(longest,run);} else run=0;
-    previous=record.date;
-  }
-  let cursor=days[today]?.status?today:shiftDate(today,-1),current=0;
-  while(days[cursor]?.status==="clear") {current++;cursor=shiftDate(cursor,-1);}
-  const monthly=records.filter(r=>r.date.startsWith(month));
-  const clear=monthly.filter(r=>r.status==="clear").length;
-  return {total:records.reduce((sum,r)=>sum+r.count,0),totalDays:records.length,resetCount:records.reduce((sum,r)=>sum+r.resets,0),longest,current,monthClear:clear,monthReset:monthly.length-clear,monthResetCount:monthly.reduce((sum,r)=>sum+r.resets,0),monthTotal:monthly.length,ratio:monthly.length?Math.round(clear/monthly.length*100):null};
+  const records=Object.values(dailyRecords(state,today)).sort((a,b)=>a.date.localeCompare(b.date));
+  const first=records[0],last=records.at(-1),total=records.reduce((sum,r)=>sum+r.resets,0);
+  const current=last?daysBetween(last.date,today):0;
+  let longest=current;
+  for(let i=1;i<records.length;i++)longest=Math.max(longest,daysBetween(records[i-1].date,records[i].date)-1);
+  const monthly=records.filter(r=>r.date.startsWith(month)),monthTotal=monthCoverage(first?.date,today,month),clear=monthTotal-monthly.length;
+  return {firstDate:first?.date||null,firstOccurredAt:first?.firstOccurredAt||null,total,totalDays:first?daysBetween(first.date,today)+1:0,eventDays:records.length,resetCount:total,longest,current,monthClear:clear,monthReset:monthly.length,monthResetCount:monthly.reduce((sum,r)=>sum+r.resets,0),monthTotal,ratio:monthTotal?Math.round(clear/monthTotal*100):null};
 }
 export function chartStatistics(state,today=dateKey(),range=30) {
-  const days=dailyRecords(state,today),start=shiftDate(today,1-range);
-  const events=Object.values(state.records).filter(r=>r.status==="reset"&&r.date>=start&&r.date<=today);
-  const daily=Array.from({length:range},(_,i)=>{const date=shiftDate(start,i),day=days[date];return {date,count:day?.resets||0,recorded:Boolean(day)};});
+  const days=dailyRecords(state,today),start=shiftDate(today,1-range),firstDate=Object.keys(days).sort()[0]||null,now=Date.now();
+  const events=Object.values(state.records).filter(r=>r.status==="reset"&&r.date>=start&&r.date<=today&&Date.parse(r.occurredAt)<=now);
+  const daily=Array.from({length:range},(_,i)=>{const date=shiftDate(start,i),day=days[date];return {date,count:day?.resets||0,tracked:Boolean(firstDate&&date>=firstDate)};});
   const weekdays=Array(7).fill(0),periods=Array(4).fill(0);let unknownTimes=0;
   for(const r of events) {
     weekdays[(parseDate(r.date).getDay()+6)%7]++;
     if(r.occurredAt)periods[Math.floor(new Date(r.occurredAt).getHours()/6)]++;else unknownTimes++;
   }
-  const months=Array.from({length:6},(_,i)=>{const date=parseDate(today);date.setDate(1);date.setMonth(date.getMonth()-5+i);const key=dateKey(date).slice(0,7);return {month:key,count:0,days:0};});
-  for(const day of Object.values(days)) {const month=months.find(m=>m.month===day.date.slice(0,7));if(month){month.count+=day.resets;month.days++;}}
-  return {daily,weekdays,periods,unknownTimes,months,total:events.length,recordedDays:daily.filter(d=>d.recorded).length};
+  const months=Array.from({length:6},(_,i)=>{const date=parseDate(today);date.setDate(1);date.setMonth(date.getMonth()-5+i);const key=dateKey(date).slice(0,7);return {month:key,count:0,days:monthCoverage(firstDate,today,key)};});
+  for(const day of Object.values(days)) {const month=months.find(m=>m.month===day.date.slice(0,7));if(month)month.count+=day.resets;}
+  return {daily,weekdays,periods,unknownTimes,months,firstDate,total:events.length,trackedDays:daily.filter(d=>d.tracked).length};
 }
 export function calendarDays(year,month) {
   const first=new Date(year,month,1,12);
@@ -133,8 +145,10 @@ export function importBackup(current,input,today=dateKey()) {
   let result=current;
   for(const r of Object.values(imported.records).sort((a,b)=>a.date.localeCompare(b.date))) {
     if(r.date>today) throw new Error("备份包含未来日期，请检查设备日期或备份内容");
-    if(r.status==="reset"&&Date.parse(r.occurredAt)>Date.now()) throw new Error("备份包含未来的记录时间");
-    result=editRecord(result,r.id,r.date,r.status,r.occurredAt);
+    validateRecordTime(r,Date.now(),today);
+    // 保留旧“没撸”数据用于备份和旧设备兼容；新版展示和统计只读取“撸了”。
+    if(r.status==="clear")result={...result,records:{...result.records,[r.id]:{...r,...nextMutation(result)}}};
+    else result=editRecord(result,r.id,r.date,r.status,r.occurredAt);
   }
   if(imported.recovery) {
     if(imported.recovery.start&&Date.parse(imported.recovery.start)>Date.now()) throw new Error("备份包含未来的计时起点");

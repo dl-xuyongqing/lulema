@@ -1,4 +1,4 @@
-import {validateState,mergeStates,MAX_RECORDS,SYNC_KEY_PATTERN} from "../src/model.js";
+import {validateState,validateRecordTime,mergeStates,MAX_RECORDS,SYNC_KEY_PATTERN} from "../src/model.js";
 
 const JSON_HEADERS={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer"};
 export function allowedOrigin(request,env) {
@@ -26,6 +26,11 @@ export function checkPayload(input,now=Date.now()) {
   try{state=validateState(input);}catch(error){throw new HttpError(400,error.message);}
   for(const value of [...Object.values(state.records),...(state.recovery?[state.recovery]:[])]) {
     if(value.updatedAt>now+300000)throw new HttpError(400,"设备时间超前，请校准后重新同步");
+  }
+  // 日期由记录设备的时区决定；UTC+14 是当前可能出现的最晚本地日期。
+  const latestDate=new Date(now+14*3600000).toISOString().slice(0,10);
+  for(const record of Object.values(state.records)) {
+    try{validateRecordTime(record,now,latestDate);}catch(error){throw new HttpError(400,error.message);}
   }
   return state;
 }

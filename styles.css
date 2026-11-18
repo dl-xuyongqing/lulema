@@ -12,6 +12,13 @@
 @media(max-width:650px){.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.stat-card{min-height:103px;padding:14px 16px}.stat-card p{font-size:10px}.stat-card .stat-caption{font-size:8px}.time-ring{margin:23px auto 13px}.time-ring span{font-size:31px}.time-ring small{font-size:9px}.energy-status{flex-direction:row;max-width:300px}.energy-status strong{font-size:12px}.energy-status span{font-size:10px}.elapsed-time>span{font-size:21px}.elapsed-time>small{font-size:10px}.today-record{font-size:10px}.calendar-day .day-count{font-size:7px}.analytics-section{margin-top:27px}.analytics-heading{flex-wrap:wrap;gap:12px}.analytics-heading .eyebrow{font-size:7px}.analytics-heading h2{font-size:16px}.analytics-heading .card-description{font-size:10px}.range-control button{padding:5px 14px;font-size:10px}.chart-cards{grid-template-columns:1fr;gap:14px}.chart-wide{grid-column:auto}.chart-card{padding:20px 17px}.chart-card .statistics-chart{min-height:125px;margin-top:15px}.chart-card h3{font-size:13px}.chart-card figcaption{font-size:9px}.chart-axis{font-size:14px}.chart-value{font-size:15px}.analytics-note{font-size:9px}.day-records{max-height:180px}.record-row{font-size:11px}}
 
 /* 同一张图切换维度和展示方式。 */
+.single-checkin{grid-template-columns:1fr}
+.single-checkin .checkin-button{flex-direction:row;gap:16px}
+.single-checkin .choice-icon{margin-bottom:0}
+.single-checkin .choice-icon svg{width:30px;height:30px}
+.single-checkin-copy{display:flex;flex-direction:column;align-items:flex-start;gap:2px}
+.single-checkin-copy strong{font-size:23px}
+.tracking-period{font-size:10px;color:#8a9780;line-height:1.8;margin-top:12px}
 .chart-month-range{font-size:11px;color:#768b66;background:#eaf0e2;border:1px solid #e2e9da;border-radius:10px;padding:9px 16px;white-space:nowrap}
 .chart-toolbar{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:19px}
 .dimension-control,.chart-type-control{display:flex;gap:4px}

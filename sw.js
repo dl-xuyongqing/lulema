@@ -1,5 +1,5 @@
 const PREFIX="lulema-shell-";
-const VERSION="v3";
+const VERSION="v4";
 // 同一域名下的项目各用自己的缓存，避免清理 Hexo 或其他网站的缓存。
 const CACHE=PREFIX+encodeURIComponent(self.registration.scope)+VERSION;
 const SHELL=["./","./index.html","./styles.css","./config.js","./src/app.js","./src/model.js","./src/charts.js","./src/storage.js","./src/cloud.js","./assets/icon.svg","./assets/icon-192.png","./assets/icon-512.png","./manifest.webmanifest"];

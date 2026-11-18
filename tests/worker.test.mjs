@@ -15,20 +15,20 @@ function setup(){const db=new D1(),key=createSyncKey(),env={DB:db,ALLOWED_ORIGIN
   }return {db,key,env,call};
 }
 test("真实 SQLite 执行迁移和批量写入，用户空间隔离",async()=>{
-  const {call,db,key}=setup();let s=setRecord(emptyState(),"2026-11-01","clear",null,1);s=setRecord(s,"2026-11-02","reset","2026-11-02T08:00:00Z",2);s=setRecovery(s,"2026-11-01T00:00:00Z",3);
+  const {call,db,key}=setup();let s=setRecord(emptyState(),"2026-11-01","reset","2026-11-01T08:00:00Z",1);s=setRecord(s,"2026-11-02","reset","2026-11-02T08:00:00Z",2);s=setRecovery(s,"2026-11-01T00:00:00Z",3);
   const res=await call("/api/v2/sync",s);assert.equal(res.status,200);assert.deepEqual(await res.json(),s);
   const another=await call("/api/v2/state",null,createSyncKey());assert.deepEqual(await another.json(),emptyState());
   const owner=await ownerId(new Request("https://api.example",{headers:{Authorization:`Bearer ${key}`}}));assert.equal(owner.length,64);assert.notEqual(owner,key);
   assert.equal(db.db.prepare("SELECT owner_id FROM record_entries LIMIT 1").get().owner_id,owner);
 });
 test("重复上传幂等，旧记录不覆盖新修改或删除",async()=>{
-  const {call}=setup(),old=setRecord(emptyState(),"2026-11-01","clear",null,1),removed=deleteRecord(old,Object.keys(old.records)[0],2);
+  const {call}=setup(),old=setRecord(emptyState(),"2026-11-01","reset","2026-11-01T08:00:00Z",1),removed=deleteRecord(old,Object.keys(old.records)[0],2);
   await call("/api/v2/sync",old);await call("/api/v2/sync",removed);const repeated=await call("/api/v2/sync",old);assert.deepEqual(await repeated.json(),removed);
   assert.deepEqual(await (await call("/api/v2/sync",removed)).json(),removed);
 });
 test("大量记录通过 JSON 批量写入，跨批次保持完整",async()=>{
   const {call}=setup();let s=emptyState();
-  for(let i=0;i<1100;i++){const date=new Date(2020,0,i+1,12),day=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;const id=`record_${String(i).padStart(5,"0")}`;s.records[id]={id,date:day,status:"clear",occurredAt:null,updatedAt:i,mutationId:`record_${String(i).padStart(5,"0")}`};}
+  for(let i=0;i<1100;i++){const date=new Date(2020,0,i+1,12),day=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;const id=`record_${String(i).padStart(5,"0")}`;s.records[id]={id,date:day,status:"reset",occurredAt:date.toISOString(),updatedAt:i,mutationId:`record_${String(i).padStart(5,"0")}`};}
   const result=await call("/api/v2/sync",s);assert.equal(result.status,200);assert.equal(Object.keys((await result.json()).records).length,1100);
 });
 test("跨域、密钥、输入和方法检查",async()=>{
@@ -39,7 +39,17 @@ test("跨域、密钥、输入和方法检查",async()=>{
 });
 test("数据库未配置和超前设备时钟有明确错误",async()=>{
   const req=new Request("https://api.example/api/state",{headers:{Authorization:`Bearer ${createSyncKey()}`}});const res=await worker.fetch(req,{});assert.equal(res.status,503);
-  const s=setRecord(emptyState(),"2026-11-01","clear",null,1000000);assert.throws(()=>checkPayload(s,0),/设备时间/);
+  const s=setRecord(emptyState(),"2026-11-01","reset","2026-11-01T08:00:00Z",1000000);assert.throws(()=>checkPayload(s,0),/设备时间/);
+});
+test("云端拒绝未来事件且不写入，接受当前事件和设备时区日期",async()=>{
+  const {call,db}=setup(),now=Date.now(),at=new Date(now-60000),s=setRecord(emptyState(),`${at.getFullYear()}-${String(at.getMonth()+1).padStart(2,"0")}-${String(at.getDate()).padStart(2,"0")}`,"reset",at.toISOString()),id=Object.keys(s.records)[0];
+  const future={...s,records:{[id]:{...s.records[id],occurredAt:new Date(now+60000).toISOString()}}};
+  const response=await call("/api/v2/sync",future);assert.equal(response.status,400);assert.match((await response.json()).error,/晚于现在/);
+  assert.equal(db.db.prepare("SELECT COUNT(*) AS count FROM record_entries").get().count,0);
+  const latestDate=new Date(now+14*3600000).toISOString().slice(0,10);
+  assert.doesNotThrow(()=>checkPayload({...s,records:{[id]:{...s.records[id],date:latestDate,occurredAt:new Date(now).toISOString()}}},now));
+  assert.throws(()=>checkPayload({...s,records:{[id]:{...s.records[id],date:new Date(now+3*86400000).toISOString().slice(0,10)}}},now),/未来日期/);
+  assert.equal((await call("/api/v2/sync",s)).status,200);
 });
 test("旧日记录迁移保留原时间和删除标记，旧设备更新也能合并",async()=>{
   const {call,db,key}=setup();
